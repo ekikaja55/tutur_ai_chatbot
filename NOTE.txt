@@ -1,0 +1,103 @@
+npm i firebase
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyAZDdg1ockegmbV11GzrCJu_vgKtZ1yT0Y",
+  authDomain: "biby-project-52b29.firebaseapp.com",
+  projectId: "biby-project-52b29",
+  storageBucket: "biby-project-52b29.firebasestorage.app",
+  messagingSenderId: "700059741407",
+  appId: "1:700059741407:web:d061850e323b727dbacd6a",
+  measurementId: "G-42L9MN5K9D"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+
+import { GoogleGenAI } from '@google/genai';
+import { fail } from '@sveltejs/kit';
+import type { Actions } from './$types';
+// Anggap saja kamu sudah membuat inisialisasi firebaseAdmin di file lib
+import { dbAdmin } from '$lib/server/firebase-admin';
+
+// 1. Inisialisasi Gemini API dengan API Key dari .env
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+export const actions = {
+chat: async ({ request, locals }) => {
+// Ambil data dari form
+const data = await request.formData();
+const userMessage = data.get('message') as string;
+
+        if (!userMessage) {
+            return fail(400, { message: userMessage, error: 'Pesan tidak boleh kosong' });
+        }
+
+        // Simulasi mendapatkan ID User dari Firebase Auth yang sedang login
+        // Biasanya disimpan di locals setelah melewati hooks/middleware auth
+        const userId = locals.userId || "user_testing_123";
+
+        try {
+            // 2. AMBIL RIWAYAT CHAT DARI FIRESTORE
+            // Kita ambil 10 pesan terakhir, urutkan berdasarkan waktu terkini
+            const chatsRef = dbAdmin.collection('users').doc(userId).collection('chats');
+            const snapshot = await chatsRef.orderBy('timestamp', 'desc').limit(10).get();
+
+            let history = [];
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                // Format harus sesuai kebutuhan Gemini API: { role: 'user'|'model', parts: [{ text: '...' }] }
+                history.push({
+                    role: data.role,
+                    parts: [{ text: data.text }]
+                });
+            });
+
+            // Karena Firestore mengambil dari yang paling baru ('desc'),
+            // kita harus balik urutannya agar urut dari pesan terlama ke terbaru untuk AI
+            history.reverse();
+
+            // 3. KIRIM KE GEMINI MENGGUNAKAN FITUR CHAT SESSIONS
+            // Fitur ini otomatis menggabungkan history masa lalu dengan pesan baru
+            const chatSession = ai.chats.create({
+                model: 'gemini-1.5-flash',
+                history: history, // <--- Di sinilah AI tahu riwayat masa lalunya
+                config: {
+                    systemInstruction: "Kamu adalah CHATBOT CIHUY, asisten yang ramah dan lucu."
+                }
+            });
+
+            // Kirim pesan baru milik user
+            const response = await chatSession.sendMessage({ message: userMessage });
+            const botResponse = response.text;
+
+            // 4. SIMPAN PESAN BARU & JAWABAN BOT KE FIRESTORE
+            const batch = dbAdmin.batch();
+
+            // Simpan pesan user
+            const userDocRef = chatsRef.doc();
+            batch.set(userDocRef, { role: 'user', text: userMessage, timestamp: new Date() });
+
+            // Simpan jawaban bot
+            const botDocRef = chatsRef.doc();
+            batch.set(botDocRef, { role: 'model', text: botResponse, timestamp: new Date() });
+
+            await batch.commit();
+
+            // Kembalikan jawaban ke klien Svelte
+            return { success: true, reply: botResponse };
+
+        } catch (error) {
+            console.error(error);
+            return fail(500, { error: 'Gagal memproses pesan' });
+        }
+    }
+
+} satisfies Actions;
